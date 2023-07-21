@@ -38,24 +38,24 @@ class ThreadPoolImpl(private val numberOfThreads: Int) : ThreadPool {
 
     private inner class TaskThread : Thread() {
         override fun run() {
-            val task: FutureTask<*> = synchronized(taskList) {
-                if (taskList.isNotEmpty()) {
+            while (true) {
+                val task: FutureTask<*> = synchronized(taskList) {
+                    if (taskList.isEmpty()) {
+                        return@synchronized null
+                    }
                     taskList.removeAt(0)
-                } else {
-                    // have to make sure to keep trying
-                    return
+                } ?: continue
+
+                try {
+                    val result = task.callable()
+                    task.setResult(result)
+                } catch (e: Throwable) {
+                    task.setError(e)
                 }
-            }
 
-            try {
-                val result = task.callable()
-                task.setResult(result)
-            } catch (e: Throwable) {
-                task.setError(e)
-            }
-
-            synchronized(task) {
-                task.setComplete(true)
+                synchronized(task) {
+                    task.setComplete(true)
+                }
             }
         }
     }
@@ -63,12 +63,15 @@ class ThreadPoolImpl(private val numberOfThreads: Int) : ThreadPool {
     private inner class FutureTask<T>(val callable: () -> T) : Task<T> {
         private var result: T? = null
         private var error: Throwable? = null
-        private var isDone: Boolean = false
+        private var isDone: AtomicBoolean = AtomicBoolean(false)
+        private val callbacks: MutableList<(result: T?, error: Throwable?) -> Unit> = mutableListOf()
 
         override fun whenComplete(callback: (result: T?, error: Throwable?) -> Unit) {
-            if (isDone) {
+            if (isDone.get()) {
                 callback(result, error)
-            } // If not done we have to call it later
+            } else {
+                callbacks.add(callback)
+            }
         }
 
         fun setResult(result: Any?) {
@@ -80,7 +83,13 @@ class ThreadPoolImpl(private val numberOfThreads: Int) : ThreadPool {
         }
 
         fun setComplete(complete: Boolean) {
-            isDone = complete
+            isDone.set(complete)
+            if (complete) {
+                callbacks.forEach() {
+                    it(result, error)
+                }
+                callbacks.clear()
+            }
         }
     }
 

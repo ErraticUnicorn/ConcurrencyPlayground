@@ -11,7 +11,8 @@ class ThreadPoolImplTest {
         val threads = 2
         val threadPool = ThreadPoolImpl.create(threads)
         threadPool.submit { boolean = AtomicBoolean(true) }
-        Thread.sleep(10000)
-        assertEquals(true, boolean)
+        threadPool.submit { println("Hey, it's me another job!") }
+        Thread.sleep(1000)
+        assertEquals(true, boolean.get())
     }
 }
