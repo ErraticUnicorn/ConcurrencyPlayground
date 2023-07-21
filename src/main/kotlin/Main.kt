@@ -1,3 +1,5 @@
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.BlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
 fun main(args: Array<String>) {
@@ -16,12 +18,12 @@ interface ThreadPool {
     fun <T> submit(task: () -> T): Task<T>
 
     companion object {
-        fun create(numberOfThreads: Int): ThreadPool = TODO()
+        fun create(numberOfThreads: Int): ThreadPool = ThreadPoolImpl.create(numberOfThreads)
     }
 }
 
 class ThreadPoolImpl(private val numberOfThreads: Int) : ThreadPool {
-    private val taskList: MutableList<FutureTask<*>> = mutableListOf(FutureTask { println("I am a job") })
+    private val taskList: BlockingQueue<FutureTask<*>> = ArrayBlockingQueue(MAX_CAPACITY)
     private val threads: List<TaskThread> = List(numberOfThreads) { TaskThread() }
 
     init {
@@ -39,12 +41,7 @@ class ThreadPoolImpl(private val numberOfThreads: Int) : ThreadPool {
     private inner class TaskThread : Thread() {
         override fun run() {
             while (true) {
-                val task: FutureTask<*> = synchronized(taskList) {
-                    if (taskList.isEmpty()) {
-                        return@synchronized null
-                    }
-                    taskList.removeAt(0)
-                } ?: continue
+                val task: FutureTask<*> = taskList.take()
 
                 try {
                     val result = task.callable()
@@ -52,48 +49,71 @@ class ThreadPoolImpl(private val numberOfThreads: Int) : ThreadPool {
                 } catch (e: Throwable) {
                     task.setError(e)
                 }
-
-                synchronized(task) {
-                    task.setComplete(true)
-                }
-            }
-        }
-    }
-
-    private inner class FutureTask<T>(val callable: () -> T) : Task<T> {
-        private var result: T? = null
-        private var error: Throwable? = null
-        private var isDone: AtomicBoolean = AtomicBoolean(false)
-        private val callbacks: MutableList<(result: T?, error: Throwable?) -> Unit> = mutableListOf()
-
-        override fun whenComplete(callback: (result: T?, error: Throwable?) -> Unit) {
-            if (isDone.get()) {
-                callback(result, error)
-            } else {
-                callbacks.add(callback)
-            }
-        }
-
-        fun setResult(result: Any?) {
-            this.result = result as T?
-        }
-
-        fun setError(throwable: Throwable?) {
-            error = throwable
-        }
-
-        fun setComplete(complete: Boolean) {
-            isDone.set(complete)
-            if (complete) {
-                callbacks.forEach() {
-                    it(result, error)
-                }
-                callbacks.clear()
             }
         }
     }
 
     companion object {
+
+        private const val MAX_CAPACITY = 100000
         fun create(numberOfThreads: Int): ThreadPool = ThreadPoolImpl(numberOfThreads)
     }
+}
+
+class FutureTask<T>(val callable: () -> T) : Task<T> {
+    private var result: T? = null
+    private var error: Throwable? = null
+    private var isDone: AtomicBoolean = AtomicBoolean(false)
+    private val callbacks: MutableList<(result: T?, error: Throwable?) -> Unit> = mutableListOf()
+
+    override fun whenComplete(callback: (result: T?, error: Throwable?) -> Unit) {
+        synchronized(this) {
+            if (isDone.get()) {
+                callback(result, error)
+            } else {
+                // race condition
+                callbacks.add(callback)
+            }
+        }
+    }
+
+    fun setResult(result: Any?) {
+        synchronized(this) {
+            this.result = result as T?
+            setComplete(true)
+            callbacks.forEach() {
+                it(result, error)
+            }
+            callbacks.clear()
+        }
+    }
+
+    fun setError(throwable: Throwable?) {
+        synchronized(this) {
+            error = throwable
+            setComplete(true)
+        }
+    }
+
+    private fun setComplete(complete: Boolean) {
+        isDone.set(complete)
+    }
+}
+
+fun <T> List<Task<T>>.gatherUnordered(): Task<MutableList<T>> {
+    val results = mutableListOf<T>()
+    val futureTasks = FutureTask { results }
+
+    this.forEach { task ->
+        task.whenComplete { result, error ->
+            if (error != null) {
+                futureTasks.setError(error)
+            } else if (result != null) {
+                futureTasks.setResult(result)
+                results.add(result)
+            }
+        }
+    }
+    // TODO: Do not use mutable list
+    return futureTasks
 }
