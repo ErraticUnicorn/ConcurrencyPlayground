@@ -1,5 +1,6 @@
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.BlockingQueue
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
 fun main(args: Array<String>) {
@@ -23,7 +24,7 @@ interface ThreadPool {
 }
 
 class ThreadPoolImpl(private val numberOfThreads: Int) : ThreadPool {
-    private val taskList: BlockingQueue<FutureTask<*>> = ArrayBlockingQueue(MAX_CAPACITY)
+    private val taskList: BlockingQueue<TaskImpl<*>> = ArrayBlockingQueue(MAX_CAPACITY)
     private val threads: List<TaskThread> = List(numberOfThreads) { TaskThread() }
 
     init {
@@ -31,7 +32,7 @@ class ThreadPoolImpl(private val numberOfThreads: Int) : ThreadPool {
     }
 
     override fun <T> submit(task: () -> T): Task<T> {
-        val future = FutureTask(task)
+        val future = TaskImpl(task)
         synchronized(taskList) {
             taskList.add(future)
         }
@@ -41,7 +42,7 @@ class ThreadPoolImpl(private val numberOfThreads: Int) : ThreadPool {
     private inner class TaskThread : Thread() {
         override fun run() {
             while (true) {
-                val task: FutureTask<*> = taskList.take()
+                val task: TaskImpl<*> = taskList.take()
 
                 try {
                     val result = task.callable()
@@ -55,12 +56,12 @@ class ThreadPoolImpl(private val numberOfThreads: Int) : ThreadPool {
 
     companion object {
 
-        private const val MAX_CAPACITY = 100000
+        private const val MAX_CAPACITY = 10000000
         fun create(numberOfThreads: Int): ThreadPool = ThreadPoolImpl(numberOfThreads)
     }
 }
 
-class FutureTask<T>(val callable: () -> T) : Task<T> {
+class TaskImpl<T>(val callable: () -> T) : Task<T> {
     private var result: T? = null
     private var error: Throwable? = null
     private var isDone: AtomicBoolean = AtomicBoolean(false)
@@ -100,20 +101,29 @@ class FutureTask<T>(val callable: () -> T) : Task<T> {
     }
 }
 
-fun <T> List<Task<T>>.gatherUnordered(): Task<MutableList<T>> {
-    val results = mutableListOf<T>()
-    val futureTasks = FutureTask { results }
+fun <T> List<Task<T>>.gatherUnordered(): Task<List<T>> {
+    // Atomic reference
+    val results = ConcurrentLinkedQueue<T>()
+    val futureTask = TaskImpl { emptyList<T>() }
 
     this.forEach { task ->
         task.whenComplete { result, error ->
             if (error != null) {
-                futureTasks.setError(error)
-            } else if (result != null) {
-                futureTasks.setResult(result)
-                results.add(result)
+                futureTask.setError(error)
+            } else {
+                results += result!!
+                if (results.size == this.size) {
+                    futureTask.setResult(results.toList())
+                }
             }
         }
     }
-    // TODO: Do not use mutable list
-    return futureTasks
+    return futureTask
+}
+
+fun <T, R> map(f: (T) -> R): Task<R> {
+    TODO()
+}
+fun <T, R> flatMap(f: (T) -> Task<R>): Task<R> {
+    TODO()
 }
